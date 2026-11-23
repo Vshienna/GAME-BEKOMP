@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cozy Pixel Bakery Tycoon</title>
+<style>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body {
+    background-color: #2b211a;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    font-family: 'Courier New', Courier, monospace;
+  }
+  #game-container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  canvas {
+    background-color: #fdf6e3;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65);
+    image-rendering: -moz-crisp-edges;
+    image-rendering: -webkit-crisp-edges;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="gameCanvas" width="960" height="540"></canvas>
+</div>
+
+<script>
+/**
+ * COZY PIXEL BAKERY TYCOON
+ * Self-contained HTML5 Canvas 2D Pixel Art Game
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// Internal logical resolution (16:9) - drawn with crisp 2px/3px pixel grid aesthetics
+const GAME_WIDTH = 960;
+const GAME_HEIGHT = 540;
+
+// ==========================================
+// 1. GAME CONFIGURATION & STATE
+// ==========================================
+const CONFIG = {
+  startingMoney: 35,
+  baseClickIncome: 5,
+  baseCustomerIncome: 15,
+  baseUpgradeCost: 50,
+  upgradeCostMultiplier: 1.55,
+  customerSpawnInterval: 4.5, // seconds
+  maxCustomers: 3
+};
+
+const state = {
+  money: CONFIG.startingMoney,
+  clickIncome: CONFIG.baseClickIncome,
+  customerIncome: CONFIG.baseCustomerIncome,
+  ovenLevel: 1,
+  recipeLevel: 1,
+  ovenUpgradeCost: 50,
+  recipeUpgradeCost: 75,
+  
+  // UI & Interaction states
+  upgradeModalOpen: false,
+  tutorialDismissed: false,
+  hoverTarget: null, // 'kitchen', 'upgradeBtn', 'modalClose', 'upgradeOven', 'upgradeRecipe'
+  
+  // Animation timers
+  time: 0,
+  chefBounce: 0,
+  chefBlinkTimer: 0,
+  chefBlinking: false,
+  chefKneadAnim: 0,
+  upgradeBtnPress: 0,
+  spawnTimer: 1.5,
+  
+  // Entities
+  customers: [],
+  floatingTexts: [],
+  particles: []
+};
+
+// Interactive Hitboxes (Logical 960x540 coordinates)
+const HITBOXES = {
+  // Left kitchen prep table, chef, and oven area
+  kitchen: { x: 15, y: 180, w: 300, h: 330 },
+  // Bottom right large orange Upgrade button
+  upgradeBtn: { x: 700, y: 445, w: 235, h: 72 },
+  // Modal hitboxes (when open)
+  modalBox: { x: 180, y: 80, w: 600, h: 380 },
+  modalClose: { x: 730, y: 95, w: 36, h: 36 },
+  upgradeOvenBtn: { x: 225, y: 170, w: 510, h: 110 },
+  upgradeRecipeBtn: { x: 225, y: 305, w: 510, h: 110 }
+};
+
+// ==========================================
+// 2. RESPONSIVE SCALING & INPUT HANDLING
+// ==========================================
+function resizeCanvas() {
+  const container = document.getElementById('game-container');
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  const targetRatio = GAME_WIDTH / GAME_HEIGHT;
+  const windowRatio = cw / ch;
+
+  let finalW, finalH;
+  if (windowRatio > targetRatio) {
+    finalH = ch;
+    finalW = ch * targetRatio;
+  } else {
+    finalW = cw;
+    finalH = cw / targetRatio;
+  }
+
+  canvas.style.width = `${Math.floor(finalW)}px`;
+  canvas.style.height = `${Math.floor(finalH)}px`;
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+function getLogicalMousePos(evt) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = GAME_WIDTH / rect.width;
+  const scaleY = GAME_HEIGHT / rect.height;
+  return {
+    x: (evt.clientX - rect.left) * scaleX,
+    y: (evt.clientY - rect.top) * scaleY
+  };
+}
+
+function pointInRect(px, py, rect) {
+  return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+}
+
+canvas.addEventListener('mousemove', (e) => {
+  const pos = getLogicalMousePos(e);
+  state.hoverTarget = null;
+
+  if (state.upgradeModalOpen) {
+    if (pointInRect(pos.x, pos.y, HITBOXES.modalClose) || !pointInRect(pos.x, pos.y, HITBOXES.modalBox)) {
+      state.hoverTarget = 'modalClose';
+    } else if (pointInRect(pos.x, pos.y, HITBOXES.upgradeOvenBtn)) {
+      state.hoverTarget = 'upgradeOven';
+    } else if (pointInRect(pos.x, pos.y, HITBOXES.upgradeRecipeBtn)) {
+      state.hoverTarget = 'upgradeRecipe';
+    }
+  } else {
+    if (pointInRect(pos.x, pos.y, HITBOXES.upgradeBtn)) {
+      state.hoverTarget = 'upgradeBtn';
+    } else if (pointInRect(pos.x, pos.y, HITBOXES.kitchen)) {
+      state.hoverTarget = 'kitchen';
+    }
+  }
+});
+
+canvas.addEventListener('mousedown', (e) => {
+  const pos = getLogicalMousePos(e);
+
+  // Handle Upgrade Modal interactions first
+  if (state.upgradeModalOpen) {
+    if (pointInRect(pos.x, pos.y, HITBOXES.upgradeOvenBtn)) {
+      tryUpgradeOven();
+      return;
+    }
+    if (pointInRect(pos.x, pos.y, HITBOXES.upgradeRecipeBtn)) {
+      tryUpgradeRecipe();
+      return;
+    }
+    if (pointInRect(pos.x, pos.y, HITBOXES.modalClose) || !pointInRect(pos.x, pos.y, HITBOXES.modalBox)) {
+      state.upgradeModalOpen = false;
+      playSound('click');
+      return;
+    }
+    return;
+  }
+
+  // Handle Upgrade Button click
+  if (pointInRect(pos.x, pos.y, HITBOXES.upgradeBtn)) {
+    state.upgradeBtnPress = 0.15;
+    state.upgradeModalOpen = true;
+    playSound('click');
+    return;
+  }
+
+  // Handle Kitchen / Baking Area click
+  if (pointInRect(pos.x, pos.y, HITBOXES.kitchen)) {
+    handleBakeClick(pos.x, pos.y);
+  }
+});
+
+// ==========================================
+// 3. SYNTHESIZED RETRO SOUND EFFECTS (Web Audio)
+// ==========================================
+let audioCtx = null;
+function playSound(type) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    const now = audioCtx.currentTime;
+    if (type === 'bake') {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.exponentialRampToValueAtTime(780, now + 0.08);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+      osc.start(now);
+      osc.stop(now + 0.09);
+    } else if (type === 'coin') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(987.77, now); // B5
+      osc.frequency.setValueAtTime(1318.51, now + 0.06); // E6
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+      osc.start(now);
+      osc.stop(now + 0.22);
+    } else if (type === 'upgrade') {
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(440, now);
+      osc.frequency.setValueAtTime(554, now + 0.07);
+      osc.frequency.setValueAtTime(659, now + 0.14);
+      osc.frequency.setValueAtTime(880, now + 0.21);
+      gain.gain.setValueAtTime(0.09, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+      osc.start(now);
+      osc.stop(now + 0.35);
+    } else if (type === 'error') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(180, now);
+      osc.frequency.linearRampToValueAtTime(130, now + 0.14);
+      gain.gain.setValueAtTime(0.09, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      osc.start(now);
+      osc.stop(now + 0.15);
+    } else {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(600, now);
+      gain.gain.setValueAtTime(0.08, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+      osc.start(now);
+      osc.stop(now + 0.05);
+    }
+  } catch (e) {
+    // Ignore audio errors if blocked
+  }
+}
+
+// ==========================================
+// 4. GAMEPLAY LOGIC (BAKING, UPGRADES, CUSTOMERS)
+// ==========================================
+function handleBakeClick(x, y) {
+  state.money += state.clickIncome;
+  state.chefKneadAnim = 0.22;
+  state.chefBounce = 4;
+  playSound('bake');
+
+  // Spawn floating +$ indicator
+  spawnFloatingText(`+$${state.clickIncome}`, x, y - 15, '#ffdf4d', '#5c2c06');
+
+  // Spawn cute flour/sparkle particles on the prep counter
+  for (let i = 0; i < 6; i++) {
+    state.particles.push({
+      x: 115 + (Math.random() - 0.5) * 60,
+      y: 382 + (Math.random() - 0.5) * 14,
+      vx: (Math.random() - 0.5) * 70,
+      vy: -30 - Math.random() * 50,
+      life: 0.45 + Math.random() * 0.2,
+      maxLife: 0.65,
+      color: i % 2 === 0 ? '#fffdf5' : '#ffd166',
+      size: 4
+    });
+  }
+}
+
+function tryUpgradeOven() {
+  if (state.money >= state.ovenUpgradeCost) {
+    state.money -= state.ovenUpgradeCost;
+    state.ovenLevel++;
+    state.clickIncome += 4 * (state.ovenLevel - 1);
+    state.ovenUpgradeCost = Math.floor(state.ovenUpgradeCost * CONFIG.upgradeCostMultiplier);
+    playSound('upgrade');
+    spawnFloatingText(`OVEN LV.${state.ovenLevel}!`, 480, 220, '#6bf178', '#1b4332');
+    spawnCelebrationParticles(480, 240);
+  } else {
+    playSound('error');
+    spawnFloatingText('Not enough $!', 480, 220, '#ff6b6b', '#4a0e0e');
+  }
+}
+
+function tryUpgradeRecipe() {
+  if (state.money >= state.recipeUpgradeCost) {
+    state.money -= state.recipeUpgradeCost;
+    state.recipeLevel++;
+    state.customerIncome += 12;
+    state.clickIncome += 2;
+    state.recipeUpgradeCost = Math.floor(state.recipeUpgradeCost * CONFIG.upgradeCostMultiplier);
+    playSound('upgrade');
+    spawnFloatingText(`RECIPE LV.${state.recipeLevel}!`, 480, 340, '#6bf178', '#1b4332');
+    spawnCelebrationParticles(480, 350);
+  } else {
+    playSound('error');
+    spawnFloatingText('Not enough $!', 480, 340, '#ff6b6b', '#4a0e0e');
+  }
+}
+
+function spawnFloatingText(text, x, y, color, outline) {
+  state.floatingTexts.push({
+    text,
+    x,
+    y,
+    vy: -48,
+    life: 1.05,
+    maxLife: 1.05,
+    color,
+    outline
+  });
+}
+
+function spawnCelebrationParticles(cx, cy) {
+  const colors = ['#ffd166', '#06d6a0', '#ff6b6b', '#ffffff'];
+  for (let i = 0; i < 18; i++) {
+    const angle = (Math.PI * 2 * i) / 18;
+    const speed = 60 + Math.random() * 90;
+    state.particles.push({
+      x: cx,
+      y: cy,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 30,
+      life: 0.7,
+      maxLife: 0.7,
+      color: colors[i % colors.length],
+      size: 6
+    });
+  }
+}
+
+// Customer Appearance Presets
+const CUSTOMER_STYLES = [
+  { hair: '#5c3a21', shirt: '#e07a5f', pants: '#3d405b', skin: '#f7c59f', hairStyle: 'bob' },
+  { hair: '#2b2d42', shirt: '#81b29a', pants: '#2b2d42', skin: '#f2cc8f', hairStyle: 'short' },
+  { hair: '#d4a373', shirt: '#f28482', pants: '#4a4e69', skin: '#ffcdb2', hairStyle: 'ponytail' },
+  { hair: '#7f4f24', shirt: '#577590', pants: '#333d29', skin: '#e6b89c', hairStyle: 'short' }
+];
+
+const PASTRY_ICONS = ['croissant', 'cupcake', 'donut', 'bread'];
+
+function spawnCustomer() {
+  if (state.customers.length >= CONFIG.maxCustomers) return;
+
+  // Find available queue slot in front of counter (x = 465, 535, 605)
+  const slots = [465, 535, 605];
+  const usedSlots = state.customers.map(c => c.targetX);
+  const freeSlot = slots.find(s => !usedSlots.includes(s));
+  if (freeSlot === undefined) return;
+
+  const style = CUSTOMER_STYLES[Math.floor(Math.random() * CUSTOMER_STYLES.length)];
+  const desiredPastry = PASTRY_ICONS[Math.floor(Math.random() * PASTRY_ICONS.length)];
+
+  state.customers.push({
+    x: 915, // Enter from right door
+    y: 410,
+    targetX: freeSlot,
+    speed: 78,
+    state: 'entering', // 'entering' -> 'waiting' -> 'leaving'
+    waitTimer: 2.2 + Math.random() * 1.2,
+    walkCycle: 0,
+    style,
+    desiredPastry,
+    heartTimer: 0
+  });
+}
+
+function update(dt) {
+  state.time += dt;
+
+  // Chef idle & blink animation
+  state.chefBlinkTimer += dt;
+  if (!state.chefBlinking && state.chefBlinkTimer > 3.2) {
+    state.chefBlinking = true;
+    state.chefBlinkTimer = 0;
+  } else if (state.chefBlinking && state.chefBlinkTimer > 0.16) {
+    state.chefBlinking = false;
+    state.chefBlinkTimer = 0;
+  }
+
+  if (state.chefBounce > 0) {
+    state.chefBounce = Math.max(0, state.chefBounce - dt * 25);
+  }
+  if (state.chefKneadAnim > 0) {
+    state.chefKneadAnim = Math.max(0, state.chefKneadAnim - dt);
+  }
+  if (state.upgradeBtnPress > 0) {
+    state.upgradeBtnPress = Math.max(0, state.upgradeBtnPress - dt);
+  }
+
+  // Customer spawning
+  state.spawnTimer -= dt;
+  if (state.spawnTimer <= 0) {
+    spawnCustomer();
+    state.spawnTimer = CONFIG.customerSpawnInterval;
+  }
+
+  // Update customers
+  for (let i = state.customers.length - 1; i >= 0; i--) {
+    const c = state.customers[i];
+    c.walkCycle += dt * 9;
+
+    if (c.state === 'entering') {
+      c.x -= c.speed * dt;
+      if (c.x <= c.targetX) {
+        c.x = c.targetX;
+        c.state = 'waiting';
+      }
+    } else if (c.state === 'waiting') {
+      c.waitTimer -= dt;
+      if (c.waitTimer <= 0) {
+        // Customer buys pastry!
+        const earned = state.customerIncome;
+        state.money += earned;
+        playSound('coin');
+        spawnFloatingText(`+$${earned}`, c.x, c.y - 78, '#7ae582', '#134e24');
+        c.state = 'leaving';
+        c.heartTimer = 1.0;
+      }
+    } else if (c.state === 'leaving') {
+      c.x += c.speed * 1.1 * dt;
+      if (c.heartTimer > 0) c.heartTimer -= dt;
+      if (c.x > 940) {
+        state.customers.splice(i, 1);
+      }
+    }
+  }
+
+  // Update floating texts
+  for (let i = state.floatingTexts.length - 1; i >= 0; i--) {
+    const ft = state.floatingTexts[i];
+    ft.y += ft.vy * dt;
+    ft.life -= dt;
+    if (ft.life <= 0) {
+      state.floatingTexts.splice(i, 1);
+    }
+  }
+
+  // Update particles
+  for (let i = state.particles.length - 1; i >= 0; i--) {
+    const p = state.particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 120 * dt; // gravity
+    p.life -= dt;
+    if (p.life <= 0) {
+      state.particles.splice(i, 1);
+    }
+  }
+}
+
+// ==========================================
+// 5. PIXEL ART DRAWING HELPERS
+// ==========================================
+const OUTLINE = '#3b2314';
+
+function pxRect(x, y, w, h, fill, stroke = null, lineWidth = 2) {
+  ctx.fillStyle = fill;
+  ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.strokeRect(Math.round(x) + 0.5, Math.round(y) + 0.5, Math.round(w) - 1, Math.round(h) - 1);
+  }
+}
+
+function pxText(text, x, y, size, fill, outline = OUTLINE, align = 'center') {
+  ctx.font = `bold ${size}px "Courier New", monospace`;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  if (outline) {
+    ctx.fillStyle = outline;
+    ctx.fillText(text, Math.round(x) - 2, Math.round(y));
+    ctx.fillText(text, Math.round(x) + 2, Math.round(y));
+    ctx.fillText(text, Math.round(x), Math.round(y) - 2);
+    ctx.fillText(text, Math.round(x), Math.round(y) + 2);
+  }
+  ctx.fillStyle = fill;
+  ctx.fillText(text, Math.round(x), Math.round(y));
+}
+
+// ==========================================
+// 6. SCENE RENDERING (MATCHING REFERENCE)
+// ==========================================
+function drawBackgroundAndFloor() {
+  // Cream upper walls
+  pxRect(0, 0, GAME_WIDTH, 340, '#f5ebd6');
+
+  // Ceiling trim & right perspective wall angle
+  pxRect(0, 0, GAME_WIDTH, 26, '#e6d3b3', OUTLINE, 2);
+  // Diagonal right ceiling beam matching reference
+  ctx.fillStyle = '#e6d3b3';
+  ctx.beginPath();
+  ctx.moveTo(860, 0);
+  ctx.lineTo(960, 0);
+  ctx.lineTo(960, 75);
+  ctx.lineTo(860, 26);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = OUTLINE;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Decorative wall molding panels (Left Kitchen Wall)
+  pxRect(140, 48, 95, 190, '#faf3e3', '#dfd0b4', 2);
+  pxRect(265, 48, 120, 190, '#faf3e3', '#dfd0b4', 2);
+  pxRect(405, 48, 100, 190, '#faf3e3', '#dfd0b4', 2);
+
+  // Decorative wall molding panels (Right Cafe Wall)
+  pxRect(555, 48, 130, 190, '#faf3e3', '#dfd0b4', 2);
+  pxRect(715, 48, 130, 190, '#faf3e3', '#dfd0b4', 2);
+
+  // Vertical wooden divider pillar between Kitchen and Dining Area
+  pxRect(514, 24, 24, 316, '#c88a55', OUTLINE, 2);
+  pxRect(517, 26, 6, 312, '#dfa36c'); // highlight
+
+  // Wooden Wainscoting (Lower wall paneling)
+  pxRect(0, 255, 865, 85, '#d59b62', OUTLINE, 2);
+  for (let x = 15; x < 855; x += 48) {
+    if (x > 505 && x < 540) continue;
+    pxRect(x, 267, 36, 62, '#c5874e', '#9e6534', 2);
+  }
+
+  // Right angled entrance wall
+  ctx.fillStyle = '#eedcc0';
+  ctx.beginPath();
+  ctx.moveTo(862, 26);
+  ctx.lineTo(960, 75);
+  ctx.lineTo(960, 375);
+  ctx.lineTo(862, 340);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = OUTLINE;
+  ctx.stroke();
+
+  // Right wall lower wainscoting
+  ctx.fillStyle = '#c88a55';
+  ctx.beginPath();
+  ctx.moveTo(862, 255);
+  ctx.lineTo(960, 282);
+  ctx.lineTo(960, 385);
+  ctx.lineTo(862, 340);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Checkered Pastel Green & Beige Floor Tiles
+  const floorY = 340;
+  const tileW = 48;
+  const tileH = 34;
+  for (let row = 0; row < 6; row++) {
+    for (let col = 0; col < 21; col++) {
+      const isGreen = (row + col) % 2 === 0;
+      const color = isGreen ? '#b9cfb4' : '#e8dec8';
+      const tx = col * tileW - (row * 6);
+      const ty = floorY + row * tileH;
+      pxRect(tx, ty, tileW + 1, tileH + 1, color);
+    }
+  }
+  // Floor top baseboard border
+  pxRect(0, 338, 864, 6, '#8c5830', OUTLINE, 2);
+}
+
+function drawBrickOven() {
+  const ox = 12;
+  const oy = 212;
+
+  // Chimney Stack
+  pxRect(ox + 34, 46, 56, 168, '#c96e4b', OUTLINE, 2);
+  // Chimney brick texture
+  ctx.fillStyle = '#a85334';
+  for (let by = 56; by < 205; by += 18) {
+    pxRect(ox + 36, by, 52, 2, '#8a3e24');
+    const offset = (by / 18) % 2 === 0 ? 14 : 32;
+    pxRect(ox + 36 + offset, by, 2, 18, '#8a3e24');
+  }
+  // Chimney lip
+  pxRect(ox + 30, 44, 64, 8, '#b55b3a', OUTLINE, 2);
+  pxRect(ox + 26, 206, 72, 10, '#b55b3a', OUTLINE, 2);
+
+  // Main Oven Dome Body
+  pxRect(ox, oy, 134, 152, '#c96e4b', OUTLINE, 2);
+  // Rounded brick dome top
+  pxRect(ox + 8, oy - 12, 118, 16, '#c96e4b', OUTLINE, 2);
+  pxRect(ox + 20, oy - 20, 94, 12, '#c96e4b', OUTLINE, 2);
+
+  // Brick lines on oven body
+  for (let by = oy + 12; by < oy + 145; by += 16) {
+    pxRect(ox + 2, by, 130, 2, '#8a3e24');
+  }
+
+  // Oven Arched Fire Opening
+  pxRect(ox + 24, oy + 24, 86, 58, '#4a2518', OUTLINE, 2);
+  pxRect(ox + 30, oy + 16, 74, 12, '#4a2518', OUTLINE, 2);
+  // Arch stone border
+  ctx.strokeStyle = '#9c4c30';
+  ctx.lineWidth = 5;
+  ctx.strokeRect(ox + 22, oy + 20, 90, 62);
+
+  // Logs inside oven
+  pxRect(ox + 38, oy + 72, 56, 8, '#6e3b1e', OUTLINE, 2);
+  pxRect(ox + 44, oy + 67, 42, 7, '#854927', OUTLINE, 2);
+
+  // Animated Glowing Fire!
+  const flicker = Math.sin(state.time * 14) * 3;
+  const flicker2 = Math.cos(state.time * 19) * 2.5;
+  const fireBoost = Math.min(8, (state.ovenLevel - 1) * 2);
+
+  // Outer orange flame
+  ctx.fillStyle = '#ff6b1a';
+  ctx.beginPath();
+  ctx.moveTo(ox + 40, oy + 72);
+  ctx.lineTo(ox + 50, oy + 44 - flicker - fireBoost);
+  ctx.lineTo(ox + 67, oy + 32 + flicker2 - fireBoost);
+  ctx.lineTo(ox + 84, oy + 45 - flicker2 - fireBoost);
+  ctx.lineTo(ox + 92, oy + 72);
+  ctx.closePath();
+  ctx.fill();
+
+  // Inner yellow flame
+  ctx.fillStyle = '#ffd13b';
+  ctx.beginPath();
+  ctx.moveTo(ox + 48, oy + 72);
+  ctx.lineTo(ox + 58, oy + 50 + flicker);
+  ctx.lineTo(ox + 67, oy + 42 - flicker);
+  ctx.lineTo(ox + 78, oy + 52 + flicker2);
+  ctx.lineTo(ox + 84, oy + 72);
+  ctx.closePath();
+  ctx.fill();
+
+  // Cute pixel ember sparks
+  const sparkY = oy + 35 - ((state.time * 25) % 24);
+  pxRect(ox + 56 + flicker, sparkY, 3, 3, '#fff3b0');
+  pxRect(ox + 74 - flicker, sparkY + 6, 3, 3, '#ffd13b');
+
+  // Oven Middle Ledge
+  pxRect(ox - 4, oy + 84, 142, 10, '#d9825b', OUTLINE, 2);
+
+  // Lower Wood Storage Cubby
+  pxRect(ox + 26, oy + 102, 82, 42, '#3d2217', OUTLINE, 2);
+  // Stacked firewood logs
+  for (let lx = 0; lx < 4; lx++) {
+    pxRect(ox + 32 + lx * 18, oy + 128, 16, 12, '#a66838', OUTLINE, 2);
+    pxRect(ox + 35 + lx * 18, oy + 131, 6, 6, '#d9a066');
+  }
+  for (let lx = 0; lx < 3; lx++) {
+    pxRect(ox + 40 + lx * 18, oy + 116, 16, 12, '#8f562b', OUTLINE, 2);
+    pxRect(ox + 43 + lx * 18, oy + 119, 6, 6, '#c78c52');
+  }
+}
+
+function drawKitchenFurnitureAndProps() {
+  // Wall Shelf with Jars & Flour Bag
+  pxRect(132, 166, 130, 8, '#b57643', OUTLINE, 2);
+  // Brackets
+  pxRect(144, 174, 6, 10, OUTLINE);
+  pxRect(244, 174, 6, 10, OUTLINE);
+
+  // Red Jar
+  pxRect(138, 140, 22, 26, '#c94a4a', OUTLINE, 2);
+  pxRect(143, 146, 12, 10, '#fff8e7');
+  // Bowl of dough/flour
+  pxRect(166, 152, 26, 14, '#7d9db5', OUTLINE, 2);
+  pxRect(168, 147, 22, 6, '#f7e3b5', OUTLINE, 1);
+  // Small spice jar
+  pxRect(198, 144, 20, 22, '#e8dcc5', OUTLINE, 2);
+  pxRect(200, 140, 16, 5, '#b57643', OUTLINE, 1);
+  // Flour Sack
+  pxRect(224, 136, 28, 30, '#e3c08d', OUTLINE, 2);
+  pxRect(232, 145, 12, 12, '#fff5e0');
+
+  // Hanging Utensils Rack under shelf
+  pxRect(146, 192, 105, 4, OUTLINE);
+  // Frying pan
+  pxRect(156, 196, 4, 22, '#6c757d', OUTLINE, 1);
+  pxRect(148, 216, 20, 20, '#495057', OUTLINE, 2);
+  // Ladle
+  pxRect(184, 196, 4, 26, '#8d99ae', OUTLINE, 1);
+  pxRect(180, 220, 12, 10, '#6c757d', OUTLINE, 2);
+  // Spatula
+  pxRect(210, 196, 4, 24, '#8d99ae', OUTLINE, 1);
+  pxRect(205, 220, 14, 14, '#adb5bd', OUTLINE, 2);
+  // Whisk
+  pxRect(236, 196, 4, 20, '#8d99ae', OUTLINE, 1);
+  pxRect(232, 216, 12, 16, '#dee2e6', OUTLINE, 2);
+
+  // Small Kitchen Window behind rack
+  pxRect(274, 178, 66, 76, '#a36836', OUTLINE, 2);
+  pxRect(280, 184, 25, 30, '#bce0fd', OUTLINE, 1);
+  pxRect(309, 184, 25, 30, '#bce0fd', OUTLINE, 1);
+  pxRect(280, 218, 25, 30, '#d8f3dc', OUTLINE, 1);
+  pxRect(309, 218, 25, 30, '#d8f3dc', OUTLINE, 1);
+
+  // Silver Cooling Rack with Fresh Loaves
+  pxRect(256, 258, 106, 98, '#9aa5b1', OUTLINE, 2);
+  pxRect(262, 264, 94, 88, '#cbd2d9');
+  // 3 Shelves of Bread Loaves
+  for (let row = 0; row < 2; row++) {
+    const sy = 276 + row * 32;
+    pxRect(258, sy + 16, 102, 4, '#616e7c');
+    for (let b = 0; b < 3; b++) {
+      const bx = 266 + b * 31;
+      pxRect(bx, sy, 26, 15, '#e09145', OUTLINE, 2);
+      pxRect(bx + 4, sy + 3, 18, 5, '#f4b86a');
+    }
+  }
+
+  // Tall Retro Cream Refrigerator
+  pxRect(374, 180, 114, 175, '#f2eee4', OUTLINE, 2);
+  // Fridge top/bottom door split
+  pxRect(374, 276, 114, 3, OUTLINE);
+  // Handles
+  pxRect(384, 216, 7, 44, '#adb5bd', OUTLINE, 2);
+  pxRect(384, 290, 7, 44, '#adb5bd', OUTLINE, 2);
+  // Sticky notes on fridge
+  pxRect(406, 206, 18, 22, '#fff9db', '#8c7a5b', 1);
+  pxRect(436, 202, 16, 20, '#fff3bf', '#8c7a5b', 1);
+  pxRect(452, 232, 18, 22, '#e3fafc', '#8c7a5b', 1);
+
+  // Two Potted Plants on top of Refrigerator
+  drawPottedPlant(408, 180, 34, 26);
+  drawPottedPlant(452, 180, 38, 28);
+
+  // Foreground Wooden Preparation Counter (Left)
+  const isKitchenHovered = state.hoverTarget === 'kitchen' && !state.upgradeModalOpen;
+  // Counter Base
+  pxRect(0, 396, 198, 96, '#8c969e', OUTLINE, 2);
+  pxRect(172, 492, 10, 14, '#6c757d', OUTLINE, 2);
+  // Wooden Countertop
+  pxRect(0, 366, 206, 32, isKitchenHovered ? '#eab073' : '#d6985c', OUTLINE, 2);
+
+  // Mixing Bowl on far left
+  pxRect(0, 352, 24, 24, '#ced4da', OUTLINE, 2);
+  pxRect(0, 348, 26, 6, '#e9ecef', OUTLINE, 2);
+
+  // Kneaded Dough & Rolling Pin (reacts when clicked!)
+  const squash = state.chefKneadAnim > 0 ? 3 : 0;
+  // Large flat dough
+  pxRect(54 - squash, 376 + squash, 64 + squash * 2, 12 - squash, '#f7e1b5', OUTLINE, 2);
+  // Small dough ball
+  pxRect(136, 374, 38, 14, '#f7e1b5', OUTLINE, 2);
+  // Wooden Rolling Pin
+  ctx.save();
+  ctx.translate(46, 378 - squash);
+  ctx.rotate(-0.45);
+  pxRect(-18, -5, 36, 10, '#c98649', OUTLINE, 2);
+  pxRect(-26, -3, 8, 6, '#8f562b', OUTLINE, 1);
+  pxRect(18, -3, 8, 6, '#8f562b', OUTLINE, 1);
+  ctx.restore();
+}
+
+function drawPottedPlant(cx, bottomY, potW, potH) {
+  // Terracotta pot
+  pxRect(cx - potW / 2, bottomY - potH, potW, potH, '#c4683b', OUTLINE, 2);
+  pxRect(cx - potW / 2 - 3, bottomY - potH, potW + 6, 7, '#d97a4a', OUTLINE, 2);
+  // Lush green pixel leaves
+  pxRect(cx - 16, bottomY - potH - 18, 32, 18, '#4c9540', OUTLINE, 2);
+  pxRect(cx - 10, bottomY - potH - 26, 20, 12, '#6ab04c', OUTLINE, 2);
+  pxRect(cx - 6, bottomY - potH - 22, 8, 6, '#95d5b2');
+}
+
+function drawChef() {
+  const cx = 234;
+  const cy = 472 - state.chefBounce;
+  const breathe = Math.sin(state.time * 3.5) * 1.5;
+
+  // Shadow
+  pxRect(cx - 24, 470, 48, 8, 'rgba(0,0,0,0.2)');
+
+  // Shoes & Dark Trousers
+  pxRect(cx - 18, cy - 12, 16, 12, '#8c5327', OUTLINE, 2); // left shoe
+  pxRect(cx + 2, cy - 12, 18, 12, '#8c5327', OUTLINE, 2);  // right shoe
+  pxRect(cx - 17, cy - 42, 15, 32, '#4a3b32', OUTLINE, 2); // left leg
+  pxRect(cx + 1, cy - 42, 15, 32, '#4a3b32', OUTLINE, 2);  // right leg
+
+  // Torso (White Chef Coat)
+  const torsoY = cy - 86 + breathe;
+  pxRect(cx - 22, torsoY, 44, 46, '#ffffff', OUTLINE, 2);
+  // Double-breasted coat line & buttons
+  pxRect(cx + 2, torsoY + 2, 2, 26, '#cbd5e1');
+  pxRect(cx - 4, torsoY + 10, 3, 3, '#94a3b8');
+  pxRect(cx - 4, torsoY + 20, 3, 3, '#94a3b8');
+
+  // Light Blue Apron
+  pxRect(cx - 18, torsoY + 24, 38, 28, '#cde4f7', OUTLINE, 2);
+  pxRect(cx - 18, torsoY + 24, 38, 4, '#5c7cfa', OUTLINE, 1);
+
+  // Arms (Animated when baking!)
+  const armLift = state.chefKneadAnim > 0 ? -12 : 0;
+  // Back arm
+  pxRect(cx + 18, torsoY + 6 + armLift, 11, 28, '#f1f5f9', OUTLINE, 2);
+  pxRect(cx + 19, torsoY + 32 + armLift, 9, 9, '#ffd5b8', OUTLINE, 2);
+  // Front arm
+  pxRect(cx - 27, torsoY + 6 + armLift, 13, 30, '#ffffff', OUTLINE, 2);
+  pxRect(cx - 26, torsoY + 34 + armLift, 11, 10, '#ffd5b8', OUTLINE, 2);
+
+  // Chibi Head
+  const headY = torsoY - 46;
+  pxRect(cx - 26, headY, 54, 46, '#ffd5b8', OUTLINE, 2);
+
+  // Dark Brown Hair
+  pxRect(cx - 26, headY, 54, 12, '#4a2e1b', OUTLINE, 2);
+  pxRect(cx - 26, headY + 10, 10, 18, '#4a2e1b'); // sideburn
+  // Ear
+  pxRect(cx - 30, headY + 20, 7, 11, '#f4b894', OUTLINE, 2);
+
+  // Cute Face (Eyes, Rosy Cheeks, Smile)
+  if (state.chefBlinking) {
+    pxRect(cx - 4, headY + 24, 8, 3, OUTLINE);
+    pxRect(cx + 14, headY + 24, 8, 3, OUTLINE);
+  } else {
+    pxRect(cx - 3, headY + 19, 6, 9, '#2b1b12');
+    pxRect(cx - 2, headY + 20, 2, 2, '#ffffff');
+    pxRect(cx + 15, headY + 19, 6, 9, '#2b1b12');
+    pxRect(cx + 16, headY + 20, 2, 2, '#ffffff');
+  }
+  // Eyebrows
+  pxRect(cx - 4, headY + 14, 7, 2, '#3b2314');
+  pxRect(cx + 14, headY + 14, 7, 2, '#3b2314');
+  // Rosy cheeks
+  pxRect(cx - 10, headY + 29, 7, 4, '#f28482');
+  pxRect(cx + 21, headY + 29, 6, 4, '#f28482');
+  // Happy Smile
+  pxRect(cx + 5, headY + 34, 8, 3, '#3b2314');
+  pxRect(cx + 3, headY + 32, 2, 2, '#3b2314');
+  pxRect(cx + 13, headY + 32, 2, 2, '#3b2314');
+
+  // Fluffy White Chef Hat (Toque)
+  const hatY = headY - 30;
+  pxRect(cx - 26, hatY + 18, 54, 14, '#ffffff', OUTLINE, 2);
+  pxRect(cx - 34, hatY + 2, 70, 20, '#ffffff', OUTLINE, 2);
+  pxRect(cx - 22, hatY - 6, 46, 12, '#ffffff', OUTLINE, 2);
+  // Subtle hat shading
+  pxRect(cx - 24, hatY + 24, 50, 5, '#dce8f2');
+}
+
+function drawTutorialSpeechBubble() {
+  const bx = 248;
+  const by = 225 + Math.sin(state.time * 4) * 3;
+  const bw = 112;
+  const bh = 44;
+
+  // Pixel speech bubble box
+  pxRect(bx, by, bw, bh, '#ffffff', OUTLINE, 2);
+  pxRect(bx + 2, by + bh - 6, bw - 4, 4, '#dce4f2'); // bottom inner shade
+  // Speech tail pointing toward chef/kitchen
+  pxRect(bx + 18, by + bh, 12, 6, '#ffffff', OUTLINE, 2);
+  pxRect(bx + 14, by + bh + 6, 8, 5, '#ffffff', OUTLINE, 2);
+
+  pxText('Tap here to', bx + bw / 2, by + 15, 13, '#1e1b18', null);
+  pxText('Make Money!', bx + bw / 2, by + 31, 13, '#1e1b18', null);
+}
+
+function drawPastryDisplayCounter() {
+  const dx = 282;
+  const dy = 338;
+  const dw = 250;
+  const dh = 136;
+
+  // Wooden Base of Display Case
+  pxRect(dx, dy + 82, dw, 54, '#c4834b', OUTLINE, 2);
+  pxRect(dx + 10, dy + 92, dw - 20, 34, '#a86b38', '#7d4b22', 2);
+
+  // Glass Display Top
+  pxRect(dx + 4, dy, dw - 8, 84, 'rgba(214, 240, 250, 0.55)', OUTLINE, 2);
+  // Glass diagonal reflection streaks
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+  ctx.beginPath();
+  ctx.moveTo(dx + 20, dy + 4);
+  ctx.lineTo(dx + 38, dy + 4);
+  ctx.lineTo(dx + 18, dy + 78);
+  ctx.lineTo(dx + 6, dy + 78);
+  ctx.closePath();
+  ctx.fill();
+
+  // Middle Glass Shelf
+  pxRect(dx + 6, dy + 42, dw - 12, 4, '#8ecae6', OUTLINE, 1);
+
+  // TOP SHELF PASTRIES: Croissants & Pink/Blue Cupcakes
+  // 2 Golden Croissants
+  drawCroissant(dx + 32, dy + 28);
+  drawCroissant(dx + 62, dy + 30);
+
+  // 3 Pink Cupcakes
+  for (let i = 0; i < 3; i++) {
+    drawCupcake(dx + 102 + i * 24, dy + 32, '#ff8fab');
+  }
+  // 2 Berry/Blueberry Cupcakes
+  drawCupcake(dx + 182, dy + 32, '#9d4edd');
+  drawCupcake(dx + 208, dy + 32, '#ff7096');
+
+  // BOTTOM SHELF PASTRIES: Cookies, Cinnamon Rolls, Mini Cakes
+  for (let i = 0; i < 2; i++) {
+    // Round cookies
+    pxRect(dx + 26 + i * 26, dy + 62, 22, 16, '#d48c46', OUTLINE, 2);
+    pxRect(dx + 32 + i * 26, dy + 66, 4, 4, '#5c3317');
+    pxRect(dx + 40 + i * 26, dy + 70, 4, 4, '#5c3317');
+  }
+  for (let i = 0; i < 2; i++) {
+    // Swirl Cinnamon Rolls
+    pxRect(dx + 96 + i * 32, dy + 62, 26, 16, '#e09f5a', OUTLINE, 2);
+    pxRect(dx + 102 + i * 32, dy + 66, 14, 8, '#8c4a27');
+  }
+  for (let i = 0; i < 2; i++) {
+    // Strawberry Shortcakes
+    pxRect(dx + 172 + i * 26, dy + 62, 20, 16, '#fff3e0', OUTLINE, 2);
+    pxRect(dx + 172 + i * 26, dy + 62, 20, 5, '#ff5d8f');
+  }
+
+  // Vintage Cash Register on the right side of the counter
+  const rx = dx + 156;
+  const ry = dy - 38;
+  pxRect(rx, ry + 18, 62, 22, '#9aa5b1', OUTLINE, 2);
+  pxRect(rx + 6, ry + 6, 48, 14, '#7b8794', OUTLINE, 2);
+  // Display screen on pole
+  pxRect(rx + 36, ry - 12, 6, 18, '#616e7c', OUTLINE, 2);
+  pxRect(rx + 26, ry - 22, 28, 14, '#52606d', OUTLINE, 2);
+  pxRect(rx + 30, ry - 19, 20, 8, '#b7e4c7');
+}
+
+function drawCroissant(x, y) {
+  pxRect(x - 12, y - 8, 24, 14, '#e89838', OUTLINE, 2);
+  pxRect(x - 8, y - 11, 16, 16, '#f4a949', OUTLINE, 2);
+  pxRect(x - 4, y - 8, 8, 6, '#ffd180');
+}
+
+function drawCupcake(x, y, frostingColor) {
+  // Liner
+  pxRect(x - 8, y - 2, 16, 12, '#e29578', OUTLINE, 2);
+  // Frosting swirl
+  pxRect(x - 10, y - 11, 20, 10, frostingColor, OUTLINE, 2);
+  pxRect(x - 6, y - 16, 12, 6, frostingColor, OUTLINE, 2);
+  // Cherry on top
+  pxRect(x - 2, y - 19, 4, 4, '#d90429');
+}
+
+function drawCafeDiningArea() {
+  // Two Bright Outdoor Windows
+  drawCafeWindow(562, 178);
+  drawCafeWindow(742, 178);
+
+  // Framed Bakery Wall Art between the windows
+  // Top square sandwich/burger frame
+  pxRect(674, 152, 34, 34, '#a36836', OUTLINE, 2);
+  pxRect(679, 157, 24, 24, '#fff8e7');
+  pxRect(684, 164, 14, 10, '#e09145');
+  // Top right circular pretzel frame
+  pxRect(716, 154, 30, 30, '#a36836', OUTLINE, 2);
+  pxRect(721, 159, 20, 20, '#fff8e7');
+  pxRect(726, 164, 10, 10, '#c97a3a');
+  // Bottom left round donut frame
+  pxRect(674, 196, 26, 26, '#a36836', OUTLINE, 2);
+  pxRect(678, 200, 18, 18, '#fff8e7');
+  pxRect(682, 204, 10, 10, '#ff8fab');
+  // Bottom right cupcake frame
+  pxRect(708, 194, 32, 34, '#a36836', OUTLINE, 2);
+  pxRect(713, 199, 22, 24, '#fff8e7');
+  pxRect(719, 206, 10, 12, '#ff7096');
+
+  // Festive Bunting Flags hanging above windows
+  const flagColors = ['#f4a261', '#e76f51', '#ffffff', '#e63946', '#f4a261'];
+  ctx.strokeStyle = OUTLINE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(646, 114);
+  ctx.quadraticCurveTo(712, 134, 782, 114);
+  ctx.stroke();
+
+  for (let i = 0; i < 5; i++) {
+    const fx = 652 + i * 26;
+    const fy = 117 + Math.sin((i / 4) * Math.PI) * 9;
+    ctx.fillStyle = flagColors[i];
+    ctx.beginPath();
+    ctx.moveTo(fx, fy);
+    ctx.lineTo(fx + 20, fy);
+    ctx.lineTo(fx + 10, fy + 22);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  // Right Entrance Doorway (where customers walk in!)
+  ctx.fillStyle = '#a36836';
+  ctx.beginPath();
+  ctx.moveTo(892, 185);
+  ctx.lineTo(944, 198);
+  ctx.lineTo(944, 370);
+  ctx.lineTo(892, 350);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = OUTLINE;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Door glass panes
+  pxRect(904, 210, 26, 48, '#bce0fd', OUTLINE, 2);
+  pxRect(904, 268, 26, 44, '#d8f3dc', OUTLINE, 2);
+
+  // Menu Poster on right wall next to door
+  pxRect(868, 200, 18, 52, '#fff8e7', OUTLINE, 2);
+  pxRect(872, 208, 10, 8, '#e09145');
+  pxRect(872, 224, 10, 8, '#e09145');
+
+  // Two Dining Table Sets (Background row)
+  drawDiningSet(616, 368);
+  drawDiningSet(782, 368);
+
+  // Foreground Dining Table Set (Bottom Right)
+  drawDiningSet(748, 492);
+}
+
+function drawCafeWindow(wx, wy) {
+  pxRect(wx, wy, 72, 112, '#a36836', OUTLINE, 2);
+  // 6 glass panes showing sky and green bushes
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 2; c++) {
+      const px = wx + 6 + c * 32;
+      const py = wy + 6 + r * 34;
+      const paneColor = r === 2 ? '#95d5b2' : '#bde0fe';
+      pxRect(px, py, 28, 30, paneColor, OUTLINE, 1);
+    }
+  }
+}
+
+function drawDiningSet(cx, floorY) {
+  // Left Chair
+  pxRect(cx - 72, floorY - 68, 8, 66, '#9c6234', OUTLINE, 2); // backrest post
+  pxRect(cx - 72, floorY - 34, 34, 8, '#b57643', OUTLINE, 2); // seat
+  pxRect(cx - 44, floorY - 34, 7, 32, '#9c6234', OUTLINE, 2); // front leg
+
+  // Right Chair
+  pxRect(cx + 64, floorY - 68, 8, 66, '#9c6234', OUTLINE, 2); // backrest post
+  pxRect(cx + 38, floorY - 34, 34, 8, '#b57643', OUTLINE, 2); // seat
+  pxRect(cx + 38, floorY - 34, 7, 32, '#9c6234', OUTLINE, 2); // front leg
+
+  // Wooden Pedestal Table
+  pxRect(cx - 6, floorY - 56, 12, 52, '#8c5327', OUTLINE, 2); // pillar
+  pxRect(cx - 22, floorY - 6, 44, 7, '#9c6234', OUTLINE, 2); // base
+  pxRect(cx - 36, floorY - 64, 72, 10, '#c88a55', OUTLINE, 2); // tabletop
+
+  // Cute Small Potted Plant on Center of Table
+  drawPottedPlant(cx, floorY - 64, 22, 16);
+}
+
+function drawHangingLights() {
+  const lightXPositions = [174, 354, 622, 828];
+  lightXPositions.forEach((lx) => {
+    // Ceiling mount
+    pxRect(lx - 10, 26, 20, 4, '#6e472b', OUTLINE, 1);
+    // Cord
+    pxRect(lx - 2, 30, 4, 52, '#4a2e1b');
+    // Lamp shade
+    pxRect(lx - 14, 82, 28, 10, '#f4d58d', OUTLINE, 2);
+    pxRect(lx - 18, 92, 36, 12, '#ffe89e', OUTLINE, 2);
+    // Warm soft bulb glow
+    ctx.fillStyle = 'rgba(255, 243, 176, 0.25)';
+    ctx.beginPath();
+    ctx.arc(lx, 104, 24, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function drawCustomers() {
+  state.customers.forEach((c) => {
+    const bob = c.state === 'waiting'
+      ? Math.sin(state.time * 4 + c.targetX) * 1.5
+      : Math.abs(Math.sin(c.walkCycle)) * 4;
+    const x = Math.round(c.x);
+    const y = Math.round(c.y - bob);
+
+    // Shadow
+    pxRect(x - 16, c.y - 2, 32, 6, 'rgba(0,0,0,0.2)');
+
+    // Legs & Shoes
+    const stride = c.state === 'waiting' ? 0 : Math.sin(c.walkCycle) * 4;
+    pxRect(x - 12 + stride, y - 24, 10, 22, c.style.pants, OUTLINE, 2);
+    pxRect(x + 2 - stride, y - 24, 10, 22, c.style.pants, OUTLINE, 2);
+
+    // Shirt / Torso
+    pxRect(x - 15, y - 54, 30, 32, c.style.shirt, OUTLINE, 2);
+
+    // Chibi Head
+    pxRect(x - 18, y - 88, 36, 34, c.style.skin, OUTLINE, 2);
+    // Hair
+    pxRect(x - 19, y - 92, 38, 12, c.style.hair, OUTLINE, 2);
+    if (c.style.hairStyle === 'bob') {
+      pxRect(x - 19, y - 82, 7, 22, c.style.hair, OUTLINE, 1);
+      pxRect(x + 12, y - 82, 7, 22, c.style.hair, OUTLINE, 1);
+    }
+
+    // Eyes facing left toward counter (or right when leaving)
+    const dir = c.state === 'leaving' ? 4 : -4;
+    pxRect(x - 8 + dir, y - 74, 4, 6, '#2b1b12');
+    pxRect(x + 4 + dir, y - 74, 4, 6, '#2b1b12');
+    // Blush
+    pxRect(x - 12 + dir, y - 66, 5, 3, '#f28482');
+    pxRect(x + 8 + dir, y - 66, 5, 3, '#f28482');
+
+    // Order Bubble when waiting at counter!
+    if (c.state === 'waiting') {
+      const bx = x - 20;
+      const by = y - 134;
+      pxRect(bx, by, 40, 34, '#ffffff', OUTLINE, 2);
+      pxRect(x - 4, by + 34, 8, 5, '#ffffff', OUTLINE, 2);
+      if (c.desiredPastry === 'croissant') {
+        drawCroissant(x, by + 18);
+      } else if (c.desiredPastry === 'cupcake') {
+        drawCupcake(x, by + 22, '#ff8fab');
+      } else if (c.desiredPastry === 'donut') {
+        pxRect(x - 9, by + 9, 18, 16, '#ff8fab', OUTLINE, 2);
+        pxRect(x - 3, by + 15, 6, 4, '#ffffff');
+      } else {
+        pxRect(x - 11, by + 10, 22, 14, '#e09145', OUTLINE, 2);
+      }
+    } else if (c.state === 'leaving' && c.heartTimer > 0) {
+      // Happy heart bubble after buying!
+      pxText('♥', x, y - 106, 22, '#ff4d6d', OUTLINE);
+    }
+  });
+}
+
+// ==========================================
+// 7. HUD, UPGRADE BUTTON & UPGRADE MODAL
+// ==========================================
+function drawHUD() {
+  // 1. Top-Left Classic Money Pill (inspired by reference screenshot)
+  pxRect(12, 12, 224, 44, '#edf2f7', '#a0aec0', 2);
+  pxText('MONEY', 68, 35, 22, '#4a5568', null);
+  pxRect(128, 18, 98, 32, '#f6871f', '#dd6b20', 2);
+  pxText(`$${state.money}`, 177, 35, 22, '#ffffff', null);
+
+  // 2. Bottom-Right Money Counter right above the Upgrade Button (per prompt spec)
+  const btn = HITBOXES.upgradeBtn;
+  pxText(`$${state.money}`, btn.x + btn.w / 2, btn.y - 24, 34, '#ffffff', OUTLINE);
+
+  // 3. Large Orange Pixel-Art "Upgrade" Button in Bottom-Right
+  const pressOffset = state.upgradeBtnPress > 0 ? 4 : 0;
+  const isHovered = state.hoverTarget === 'upgradeBtn' && !state.upgradeModalOpen;
+  const btnMainColor = isHovered ? '#ff7033' : '#f45d22';
+  const btnShadowColor = '#b8370b';
+  const btnHighlightColor = '#ff9666';
+
+  // Pixel-stepped button shadow
+  pxRect(btn.x + 4, btn.y + 8, btn.w - 8, btn.h - 4, btnShadowColor, OUTLINE, 2);
+  // Main orange body
+  pxRect(btn.x, btn.y + pressOffset, btn.w, btn.h - 6, btnMainColor, OUTLINE, 2);
+  // Top highlight bar
+  pxRect(btn.x + 6, btn.y + 4 + pressOffset, btn.w - 12, 6, btnHighlightColor);
+
+  // Subtle notification badge if player can afford an upgrade
+  if (state.money >= state.ovenUpgradeCost || state.money >= state.recipeUpgradeCost) {
+    const pulse = Math.sin(state.time * 6) * 2;
+    pxRect(btn.x + btn.w - 22, btn.y - 10 + pulse, 24, 24, '#ffd166', OUTLINE, 2);
+    pxText('!', btn.x + btn.w - 10, btn.y + 3 + pulse, 18, '#3b2314', null);
+  }
+
+  pxText('Upgrade', btn.x + btn.w / 2, btn.y + 34 + pressOffset, 30, '#1e1b18', null);
+}
+
+function drawUpgradeModal() {
+  if (!state.upgradeModalOpen) return;
+
+  // Dim backdrop
+  ctx.fillStyle = 'rgba(28, 18, 12, 0.52)';
+  ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+  const m = HITBOXES.modalBox;
+  // Parchment Cream Panel with thick pixel border (matching menu.jpg reference!)
+  pxRect(m.x, m.y, m.w, m.h, '#f5ebd6', OUTLINE, 6);
+  pxRect(m.x + 8, m.y + 8, m.w - 16, m.h - 16, '#f5ebd6', '#d6c3a1', 3);
+
+  // Decorative Pixel Sparkle Crosses on corners (matching menu.jpg)
+  drawPixelSparkle(m.x + 88, m.y + 4);
+  drawPixelSparkle(m.x + m.w - 88, m.y + m.h - 4);
+
+  // Title: UPGRADE
+  pxText('UPGRADE', m.x + m.w / 2, m.y + 46, 36, '#d99b66', '#8c5327');
+
+  // Close 'X' button
+  const cl = HITBOXES.modalClose;
+  pxRect(cl.x, cl.y, cl.w, cl.h, state.hoverTarget === 'modalClose' ? '#ff6b6b' : '#e07a5f', OUTLINE, 2);
+  pxText('X', cl.x + cl.w / 2, cl.y + cl.h / 2 + 1, 22, '#ffffff', OUTLINE);
+
+  // ROW 1: OVEN UPGRADE (Increases Click Income)
+  const r1 = HITBOXES.upgradeOvenBtn;
+  const canAffordOven = state.money >= state.ovenUpgradeCost;
+  const r1Hover = state.hoverTarget === 'upgradeOven';
+  pxRect(
+    r1.x, r1.y, r1.w, r1.h,
+    r1Hover ? '#fffaf0' : '#efe2c6',
+    canAffordOven ? '#4c9540' : '#a8967a',
+    3
+  );
+  drawMiniOvenIcon(r1.x + 56, r1.y + 56);
+  pxText(`Oven (Lv.${state.ovenLevel})`, r1.x + 120, r1.y + 38, 24, '#2b1b12', null, 'left');
+  pxText(`+$${4 * state.ovenLevel} per tap`, r1.x + 120, r1.y + 72, 17, '#6e472b', null, 'left');
+
+  // Price tag button on right
+  pxRect(r1.x + 365, r1.y + 28, 125, 52, canAffordOven ? '#f45d22' : '#9aa5b1', OUTLINE, 2);
+  pxText(`$${state.ovenUpgradeCost}`, r1.x + 427, r1.y + 55, 24, '#ffffff', OUTLINE);
+
+  // ROW 2: RECIPE UPGRADE (Increases Customer Pastry Sales & Click Income)
+  const r2 = HITBOXES.upgradeRecipeBtn;
+  const canAffordRecipe = state.money >= state.recipeUpgradeCost;
+  const r2Hover = state.hoverTarget === 'upgradeRecipe';
+  pxRect(
+    r2.x, r2.y, r2.w, r2.h,
+    r2Hover ? '#fffaf0' : '#efe2c6',
+    canAffordRecipe ? '#4c9540' : '#a8967a',
+    3
+  );
+  drawLargeCroissantIcon(r2.x + 56, r2.y + 56);
+  pxText(`Recipe (Lv.${state.recipeLevel})`, r2.x + 120, r2.y + 38, 24, '#2b1b12', null, 'left');
+  pxText(`+$12/sale & +$2/tap`, r2.x + 120, r2.y + 72, 17, '#6e472b', null, 'left');
+
+  // Price tag button on right
+  pxRect(r2.x + 365, r2.y + 28, 125, 52, canAffordRecipe ? '#f45d22' : '#9aa5b1', OUTLINE, 2);
+  pxText(`$${state.recipeUpgradeCost}`, r2.x + 427, r2.y + 55, 24, '#ffffff', OUTLINE);
+}
+
+function drawPixelSparkle(cx, cy) {
+  pxRect(cx - 4, cy - 22, 8, 44, '#ffe885', OUTLINE, 2);
+  pxRect(cx - 18, cy - 4, 36, 8, '#ffe885', OUTLINE, 2);
+}
+
+function drawMiniOvenIcon(cx, cy) {
+  // Cream brick mini oven icon inspired by menu.jpg
+  pxRect(cx - 32, cy - 26, 64, 54, '#f7ebd2', OUTLINE, 2);
+  pxRect(cx - 35, cy - 32, 70, 8, '#d97a4a', OUTLINE, 2);
+  // Chimney pipe
+  pxRect(cx + 16, cy - 44, 8, 12, '#adb5bd', OUTLINE, 2);
+  pxRect(cx + 16, cy - 44, 16, 6, '#adb5bd', OUTLINE, 2);
+  // Arch window & cute fire
+  pxRect(cx - 18, cy - 10, 36, 32, '#6c757d', OUTLINE, 2);
+  pxRect(cx - 12, cy - 4, 24, 22, '#4a2518', OUTLINE, 1);
+  pxRect(cx - 6, cy + 6, 12, 10, '#ff8811');
+  pxRect(cx - 3, cy + 9, 6, 6, '#ffd13b');
+}
+
+function drawLargeCroissantIcon(cx, cy) {
+  pxRect(cx - 28, cy - 12, 56, 26, '#e08631', OUTLINE, 2);
+  pxRect(cx - 20, cy - 18, 40, 32, '#f29e44', OUTLINE, 2);
+  pxRect(cx - 10, cy - 22, 20, 34, '#f9b963', OUTLINE, 2);
+  pxRect(cx - 6, cy - 14, 12, 10, '#ffe0a3');
+}
+
+function drawParticlesAndFloatingTexts() {
+  state.particles.forEach((p) => {
+    ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+    pxRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size, p.color, OUTLINE, 1);
+  });
+  ctx.globalAlpha = 1;
+
+  state.floatingTexts.forEach((ft) => {
+    ctx.globalAlpha = Math.min(1, ft.life * 1.4);
+    pxText(ft.text, ft.x, ft.y, 22, ft.color, ft.outline);
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ==========================================
+// 8. MAIN GAME LOOP
+// ==========================================
+let lastTime = performance.now();
+
+function gameLoop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+
+  update(dt);
+
+  // Clear & Render Scene back-to-front
+  ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+  drawBackgroundAndFloor();
+  drawKitchenFurnitureAndProps();
+  drawBrickOven();
+  drawCafeDiningArea();
+  drawChef();
+  drawPastryDisplayCounter();
+  drawCustomers();
+  drawHangingLights();
+  drawTutorialSpeechBubble();
+  drawHUD();
+  drawUpgradeModal();
+  drawParticlesAndFloatingTexts();
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Spawn an initial customer shortly after start so the bakery feels lively
+setTimeout(spawnCustomer, 900);
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
